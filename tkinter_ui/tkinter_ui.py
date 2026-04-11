@@ -17,14 +17,13 @@ from default import DefaultUI
 from speed import SpeedUI
 from prefer import PreferUI
 from local import LocalUI
-from multicast import MulticastUI
-from hotel import HotelUI
 from subscribe import SubscribeUI
-from online_search import OnlineSearchUI
 from epg import EpgUI
-from utils.speed import check_ffmpeg_installed_status
+from utils.ffmpeg import check_ffmpeg_installed_status
 import pystray
 from service.app import run_service
+import atexit
+from service.rtmp import stop_rtmp_service
 
 
 class TkinterUI:
@@ -42,10 +41,7 @@ class TkinterUI:
         self.speed_ui = SpeedUI()
         self.prefer_ui = PreferUI()
         self.local_ui = LocalUI()
-        self.multicast_ui = MulticastUI()
-        self.hotel_ui = HotelUI()
         self.subscribe_ui = SubscribeUI()
-        self.online_search_ui = OnlineSearchUI()
         self.epg_ui = EpgUI()
         self.update_source = UpdateSource()
         self.update_running = False
@@ -66,7 +62,7 @@ class TkinterUI:
             self.root.destroy()
 
     def create_tray_icon(self):
-        image = Image.open(resource_path("static/images/favicon.ico"))
+        image = Image.open(resource_path("favicon.ico"))
         menu = (pystray.MenuItem("显示", self.restore_window, default=True), pystray.MenuItem("退出", self.exit_app))
         self.tray_icon = pystray.Icon("name", image, self.name, menu)
         threading.Thread(target=self.tray_icon.run, daemon=True).start()
@@ -90,10 +86,7 @@ class TkinterUI:
         self.speed_ui.change_entry_state(state=state)
         self.prefer_ui.change_entry_state(state=state)
         self.local_ui.change_entry_state(state=state)
-        self.multicast_ui.change_entry_state(state=state)
-        self.hotel_ui.change_entry_state(state=state)
         self.subscribe_ui.change_entry_state(state=state)
-        self.online_search_ui.change_entry_state(state=state)
         self.epg_ui.change_entry_state(state=state)
 
     async def run_update(self):
@@ -172,10 +165,7 @@ class TkinterUI:
         frame_speed = tk.ttk.Frame(notebook)
         frame_prefer = tk.ttk.Frame(notebook)
         frame_local = tk.ttk.Frame(notebook)
-        frame_hotel = tk.ttk.Frame(notebook)
-        frame_multicast = tk.ttk.Frame(notebook)
         frame_subscribe = tk.ttk.Frame(notebook)
-        frame_online_search = tk.ttk.Frame(notebook)
         frame_epg = tk.ttk.Frame(notebook)
 
         settings_icon_source = Image.open(
@@ -194,22 +184,10 @@ class TkinterUI:
             resource_path("static/images/local_icon.png")
         ).resize((16, 16))
         local_icon = ImageTk.PhotoImage(local_icon_source)
-        hotel_icon_source = Image.open(
-            resource_path("static/images/hotel_icon.png")
-        ).resize((16, 16))
-        hotel_icon = ImageTk.PhotoImage(hotel_icon_source)
-        multicast_icon_source = Image.open(
-            resource_path("static/images/multicast_icon.png")
-        ).resize((16, 16))
-        multicast_icon = ImageTk.PhotoImage(multicast_icon_source)
         subscribe_icon_source = Image.open(
             resource_path("static/images/subscribe_icon.png")
         ).resize((16, 16))
         subscribe_icon = ImageTk.PhotoImage(subscribe_icon_source)
-        online_search_icon_source = Image.open(
-            resource_path("static/images/online_search_icon.png")
-        ).resize((16, 16))
-        online_search_icon = ImageTk.PhotoImage(online_search_icon_source)
         epg_icon_source = Image.open(
             resource_path("static/images/epg_icon.png")
         ).resize((16, 16))
@@ -226,16 +204,6 @@ class TkinterUI:
         notebook.add(
             frame_subscribe, text="订阅源", image=subscribe_icon, compound=tk.LEFT
         )
-        notebook.add(frame_hotel, text="酒店源", image=hotel_icon, compound=tk.LEFT)
-        notebook.add(
-            frame_multicast, text="组播源", image=multicast_icon, compound=tk.LEFT
-        )
-        notebook.add(
-            frame_online_search,
-            text="关键字搜索",
-            image=online_search_icon,
-            compound=tk.LEFT,
-        )
         notebook.add(
             frame_epg,
             text="EPG",
@@ -247,20 +215,14 @@ class TkinterUI:
         notebook.speed_icon = speed_icon
         notebook.prefer_icon = prefer_icon
         notebook.local_icon = local_icon
-        notebook.hotel_icon = hotel_icon
-        notebook.multicast_icon = multicast_icon
         notebook.subscribe_icon = subscribe_icon
-        notebook.online_search_icon = online_search_icon
         notebook.epg_icon = epg_icon
 
         self.default_ui.init_ui(frame_default)
         self.speed_ui.init_ui(frame_speed)
         self.prefer_ui.init_ui(frame_prefer)
         self.local_ui.init_ui(frame_local)
-        self.multicast_ui.init_ui(frame_multicast)
-        self.hotel_ui.init_ui(frame_hotel)
         self.subscribe_ui.init_ui(frame_subscribe)
-        self.online_search_ui.init_ui(frame_online_search)
         self.epg_ui.init_ui(frame_epg)
 
         root_operate = tk.Frame(self.root)
@@ -303,7 +265,7 @@ def get_root_location(root):
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     width = 620
-    height = 650
+    height = 670
     x = (screen_width / 2) - (width / 2)
     y = (screen_height / 2) - (height / 2)
     return (width, height, x, y)
@@ -316,10 +278,12 @@ if __name__ == "__main__":
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
     root.geometry("%dx%d+%d+%d" % get_root_location(root))
-    root.iconbitmap(resource_path("static/images/favicon.ico"))
-    root.after(0, config.copy)
+    root.iconbitmap(resource_path("favicon.ico"))
+    root.after(0, config.copy("config"))
     root.after(0, config.copy("utils/nginx-rtmp-win32"))
     root.after(0, config.copy("output"))
     if config.open_service:
         root.after(0, threading.Thread(target=run_service, daemon=True).start())
+        if config.open_rtmp and sys.platform == "win32":
+            atexit.register(stop_rtmp_service)
     root.mainloop()

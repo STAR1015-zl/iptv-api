@@ -1,53 +1,62 @@
 import os
 import sys
+import time
 
 sys.path.append(os.path.dirname(sys.path[0]))
-from flask import Flask, send_from_directory, make_response, jsonify, redirect
-from utils.tools import get_result_file_content, get_ip_address, resource_path, join_url, add_port_to_url, \
-    get_url_without_scheme
+from flask import Flask, send_from_directory, make_response, request, jsonify, Response
+from utils.tools import get_result_file_content, resource_path, get_public_url
 from utils.config import config
 import utils.constants as constants
-from utils.db import get_db_connection, return_db_connection
-import subprocess
 import atexit
-from collections import OrderedDict
-import threading
-import json
+from service.rtmp import start_rtmp_service, stop_rtmp_service, app_rtmp_url, hls_temp_path, STREAMS_LOCK, \
+    hls_running_streams, start_hls_to_rtmp, hls_last_access, HLS_WAIT_TIMEOUT, HLS_WAIT_INTERVAL
+import logging
+from utils.i18n import t
+from werkzeug.utils import secure_filename
+import mimetypes
 
 app = Flask(__name__)
-nginx_dir = resource_path(os.path.join('utils', 'nginx-rtmp-win32'))
-nginx_path = resource_path(os.path.join(nginx_dir, 'nginx.exe'))
-stop_path = resource_path(os.path.join(nginx_dir, 'stop.bat'))
-hls_temp_path = resource_path(os.path.join(nginx_dir, 'temp/hls')) if sys.platform == "win32" else '/tmp/hls'
-
-def ensure_hls_dir():
-    try:
-        os.makedirs(hls_temp_path, exist_ok=True)
-    except Exception as e:
-        print(f"❌ HLS temp dir create failed: {e}")
-
-live_running_streams = OrderedDict()
-hls_running_streams = OrderedDict()
-MAX_STREAMS = 10
-
-rtmp_hls_file_url = join_url(add_port_to_url(config.app_host, 8080), 'hls/')
-app_rtmp_url = get_url_without_scheme(add_port_to_url(config.app_host, 1935))
-rtmp_hls_id_url = f"rtmp://{join_url(app_rtmp_url, 'hls/')}"
-rtmp_live_id_url = f"rtmp://{join_url(app_rtmp_url, 'live/')}"
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 
 @app.route("/")
 def show_index():
     return get_result_file_content(
-        path=constants.live_result_path if config.open_rtmp else config.final_file,
+        path=config.final_file,
         file_type="m3u" if config.open_m3u_result else "txt"
     )
 
 
 @app.route("/favicon.ico")
 def favicon():
-    return send_from_directory(resource_path('static/images'), 'favicon.ico',
+    return send_from_directory(resource_path(''), 'favicon.ico',
                                mimetype='image/vnd.microsoft.icon')
+
+
+@app.route('/logo/<path:filename>')
+def show_logo(filename):
+    if not filename:
+        return jsonify({"error": "filename required"}), 400
+
+    try:
+        safe_name = secure_filename(filename, allow_unicode=True)
+    except TypeError:
+        safe_name = os.path.basename(filename)
+        safe_name = safe_name.replace('/', '').replace('\\', '')
+        safe_name = safe_name.lstrip('.')
+
+    if not safe_name:
+        return jsonify({"error": "filename required"}), 400
+
+    logo_dir = resource_path(constants.channel_logo_path)
+    file_path = os.path.join(logo_dir, safe_name)
+
+    if not os.path.exists(file_path):
+        return jsonify({"error": "logo not found"}), 404
+
+    mime_type, _ = mimetypes.guess_type(safe_name)
+    return send_from_directory(logo_dir, safe_name, mimetype=mime_type or 'application/octet-stream')
 
 
 @app.route("/txt")
@@ -63,27 +72,6 @@ def show_ipv4_txt():
 @app.route("/ipv6/txt")
 def show_ipv6_txt():
     return get_result_file_content(path=constants.ipv6_result_path, file_type="txt")
-
-
-@app.route("/live")
-def show_live():
-    return get_result_file_content(path=constants.live_result_path,
-                                   file_type="m3u" if config.open_m3u_result else "txt")
-
-
-@app.route("/live/txt")
-def show_live_txt():
-    return get_result_file_content(path=constants.live_result_path, file_type="txt")
-
-
-@app.route("/live/ipv4/txt")
-def show_live_ipv4_txt():
-    return get_result_file_content(path=constants.live_ipv4_result_path, file_type="txt")
-
-
-@app.route("/live/ipv6/txt")
-def show_live_ipv6_txt():
-    return get_result_file_content(path=constants.live_ipv6_result_path, file_type="txt")
 
 
 @app.route("/hls")
@@ -112,11 +100,6 @@ def show_m3u():
     return get_result_file_content(path=config.final_file, file_type="m3u")
 
 
-@app.route("/live/m3u")
-def show_live_m3u():
-    return get_result_file_content(path=constants.live_result_path, file_type="m3u")
-
-
 @app.route("/hls/m3u")
 def show_hls_m3u():
     return get_result_file_content(path=constants.hls_result_path, file_type="m3u")
@@ -130,7 +113,15 @@ def show_ipv4_m3u():
 @app.route("/ipv4")
 def show_ipv4_result():
     return get_result_file_content(
-        path=constants.live_ipv4_result_path if config.open_rtmp else constants.ipv4_result_path,
+        path=constants.ipv4_result_path,
+        file_type="m3u" if config.open_m3u_result else "txt"
+    )
+
+
+@app.route("/hls/ipv4")
+def show_hls_ipv4():
+    return get_result_file_content(
+        path=constants.hls_ipv4_result_path,
         file_type="m3u" if config.open_m3u_result else "txt"
     )
 
@@ -143,19 +134,17 @@ def show_ipv6_m3u():
 @app.route("/ipv6")
 def show_ipv6_result():
     return get_result_file_content(
-        path=constants.live_ipv6_result_path if config.open_rtmp else constants.ipv6_result_path,
+        path=constants.ipv6_result_path,
         file_type="m3u" if config.open_m3u_result else "txt"
     )
 
 
-@app.route("/live/ipv4/m3u")
-def show_live_ipv4_m3u():
-    return get_result_file_content(path=constants.live_ipv4_result_path, file_type="m3u")
-
-
-@app.route("/live/ipv6/m3u")
-def show_live_ipv6_m3u():
-    return get_result_file_content(path=constants.live_ipv6_result_path, file_type="m3u")
+@app.route("/hls/ipv6")
+def show_hls_ipv6():
+    return get_result_file_content(
+        path=constants.hls_ipv6_result_path,
+        file_type="m3u" if config.open_m3u_result else "txt"
+    )
 
 
 @app.route("/hls/ipv4/m3u")
@@ -171,7 +160,7 @@ def show_hls_ipv6_m3u():
 @app.route("/content")
 def show_content():
     return get_result_file_content(
-        path=constants.live_result_path if config.open_rtmp else config.final_file,
+        path=config.final_file,
         file_type="m3u" if config.open_m3u_result else "txt",
         show_content=True
     )
@@ -188,7 +177,7 @@ def show_epg_gz():
 
 
 @app.route("/log/result")
-def show_log():
+def show_result_log():
     if os.path.exists(constants.result_log_path):
         with open(constants.result_log_path, "r", encoding="utf-8") as file:
             content = file.read()
@@ -200,7 +189,7 @@ def show_log():
 
 
 @app.route("/log/speed-test")
-def show_speed_test_log():
+def show_speed_log():
     if os.path.exists(constants.speed_test_log_path):
         with open(constants.speed_test_log_path, "r", encoding="utf-8") as file:
             content = file.read()
@@ -211,231 +200,114 @@ def show_speed_test_log():
     return response
 
 
-def get_channel_data(channel_id):
-    conn = get_db_connection(constants.rtmp_data_path)
-    channel_data = {}
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT url, headers FROM result_data WHERE id=?", (channel_id,))
-        data = cursor.fetchone()
-        if data:
-            channel_data = {
-                'url': data[0],
-                'headers': json.loads(data[1]) if data[1] else None
-            }
-    except Exception as e:
-        print(f"❌ Error retrieving channel data: {e}")
-    finally:
-        return_db_connection(constants.rtmp_data_path, conn)
-    return channel_data
+@app.route("/log/statistic")
+def show_statistic_log():
+    if os.path.exists(constants.statistic_log_path):
+        with open(constants.statistic_log_path, "r", encoding="utf-8") as file:
+            content = file.read()
+    else:
+        content = constants.waiting_tip
+    response = make_response(content)
+    response.mimetype = "text/plain"
+    return response
 
 
-def monitor_stream_process(streams, process, channel_id):
-    try:
-        stdout, stderr = process.communicate()
-        rc = process.returncode
-        if rc != 0:
-            try:
-                err_text = stderr.decode("utf-8", errors="ignore") if stderr else ""
-            except Exception:
-                err_text = str(stderr)
-            print(f"❌ FFmpeg process exit (channel_id={channel_id}, rc={rc}): {err_text[:500]}")
-    except Exception as e:
-        print(f"❌ Monitor stream process failed (channel_id={channel_id}): {e}")
-    finally:
-        if channel_id in streams:
-            del streams[channel_id]
+@app.route("/log/unmatch")
+def show_unmatch_log():
+    if os.path.exists(constants.unmatch_log_path):
+        with open(constants.unmatch_log_path, "r", encoding="utf-8") as file:
+            content = file.read()
+    else:
+        content = constants.waiting_tip
+    response = make_response(content)
+    response.mimetype = "text/plain"
+    return response
 
 
-def cleanup_streams(streams):
-    # 清理已结束的进程
-    to_delete = []
-    for channel_id, process in list(streams.items()):
-        if process.poll() is not None:
-            to_delete.append(channel_id)
-    for channel_id in to_delete:
-        try:
-            proc = streams.get(channel_id)
-            # 再次确认状态，尽量释放资源
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-            del streams[channel_id]
-        except Exception as e:
-            print(f"❌ Cleanup finished stream {channel_id} failed: {e}")
-    # 超出上限时淘汰最早的进程，并主动终止
-    while len(streams) > MAX_STREAMS:
-        try:
-            oldest_id, proc = streams.popitem(last=False)
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"❌ Cleanup oldest stream failed: {e}")
-
-
-@app.route('/live/<channel_id>', methods=['GET'])
-def run_live(channel_id):
+@app.route('/hls_proxy/<channel_id>', methods=['GET'])
+def hls_proxy(channel_id):
     if not channel_id:
-        return jsonify({'Error': 'Channel ID is required'}), 400
-    data = get_channel_data(channel_id)
-    url = data.get("url", "")
-    if not url:
-        return jsonify({'Error': 'Url not found'}), 400
-    headers = data.get("headers", None)
-    channel_rtmp_url = join_url(rtmp_live_id_url, channel_id)
-    cleanup_streams(live_running_streams)
-    if channel_id in live_running_streams:
-        process = live_running_streams[channel_id]
-        if process.poll() is None:
-            return redirect(channel_rtmp_url)
-        else:
-            del live_running_streams[channel_id]
-    # cleanup already performed above
-    cmd = [
-        'ffmpeg',
-        '-loglevel', 'error',
-        '-re',
-    ]
-    if headers:
-        cmd += ['-headers', ''.join(f'{k}: {v}\r\n' for k, v in headers.items())]
-    cmd += [
-        '-i', url.partition('$')[0],
-        '-c:v', 'copy',
-        '-c:a', 'copy',
-        '-f', 'flv',
-        '-flvflags', 'no_duration_filesize',
-        channel_rtmp_url
-    ]
-    try:
-        print(f"▶️ FFmpeg live start: id={channel_id}, dst={channel_rtmp_url}")
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE
-        )
-        threading.Thread(
-            target=monitor_stream_process,
-            args=(live_running_streams, process, channel_id),
-            daemon=True
-        ).start()
-        live_running_streams[channel_id] = process
-        return redirect(channel_rtmp_url)
-    except Exception as e:
-        return jsonify({'Error': str(e)}), 500
+        return jsonify({t("name.error"): t("msg.error_channel_id_required")}), 400
 
-
-@app.route('/hls/<channel_id>', methods=['GET'])
-def run_hls(channel_id):
-    if not channel_id:
-        return jsonify({'Error': 'Channel ID is required'}), 400
-    data = get_channel_data(channel_id)
-    url = data.get("url", "")
-    if not url:
-        return jsonify({'Error': 'Url not found'}), 400
-    headers = data.get("headers", None)
     channel_file = f'{channel_id}.m3u8'
-    ensure_hls_dir()
     m3u8_path = os.path.join(hls_temp_path, channel_file)
-    cleanup_streams(hls_running_streams)
-    if channel_id in hls_running_streams:
-        process = hls_running_streams[channel_id]
-        if process.poll() is None:
-            if os.path.exists(m3u8_path):
-                return redirect(f'{join_url(rtmp_hls_file_url, channel_file)}')
-            else:
-                return jsonify({'status': 'pending', 'message': 'Stream is starting'}), 202
-        else:
-            del hls_running_streams[channel_id]
-    # cleanup already performed above
-    cmd = [
-        'ffmpeg',
-        '-loglevel', 'error',
-        '-re',
-    ]
-    if headers:
-        cmd += ['-headers', ''.join(f'{k}: {v}\r\n' for k, v in headers.items())]
-    cmd += [
-        '-stream_loop', '-1',
-        '-i', url.partition('$')[0],
-        '-c:v', 'copy',
-        '-c:a', 'copy',
-        '-f', 'flv',
-        '-flvflags', 'no_duration_filesize',
-        join_url(rtmp_hls_id_url, channel_id)
-    ]
+
+    need_start = False
+    with STREAMS_LOCK:
+        proc = hls_running_streams.get(channel_id)
+        if not proc or proc.poll() is not None:
+            need_start = True
+            if channel_id in hls_running_streams:
+                hls_running_streams.pop(channel_id, None)
+
+    if need_start:
+        host = f"{app_rtmp_url}/hls"
+        client_ua = request.headers.get('User-Agent') if request and hasattr(request, 'headers') else None
+        print(f"▶️ {client_ua}")
+        start_hls_to_rtmp(host, channel_id, client_user_agent=client_ua)
+
+    hls_min_segments = 3
+    waited = 0.0
+    while waited < HLS_WAIT_TIMEOUT:
+        if os.path.exists(m3u8_path):
+            try:
+                with open(m3u8_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                segment_count = content.count('#EXTINF')
+                ends_with_discont = content.rstrip().endswith('#EXT-X-DISCONTINUITY')
+                if segment_count >= hls_min_segments and not ends_with_discont:
+                    break
+            except Exception as e:
+                print(t("msg.error_channel_id_m3u8_read_info").format(channel_id=channel_id, info=e))
+        time.sleep(HLS_WAIT_INTERVAL)
+        waited += HLS_WAIT_INTERVAL
+
+    if not os.path.exists(m3u8_path):
+        return jsonify({t("name.error"): t("msg.m3u8_hls_not_ready")}), 503
+
     try:
-        print(f"▶️ FFmpeg hls start: id={channel_id}, file={channel_file}")
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE
-        )
-        threading.Thread(
-            target=monitor_stream_process,
-            args=(hls_running_streams, process, channel_id),
-            daemon=True
-        ).start()
-        hls_running_streams[channel_id] = process
-        return jsonify({
-            'status': 'starting',
-            'message': 'Stream is being prepared'
-        }), 202
+        with open(m3u8_path, 'rb') as f:
+            data = f.read()
     except Exception as e:
-        return jsonify({'Error': str(e)}), 500
+        print(t("msg.error_channel_id_m3u8_read_info").format(channel_id=channel_id, info=e))
+        return jsonify({t("name.error"): t("msg.error_m3u8_read")}), 500
+
+    now = time.time()
+    with STREAMS_LOCK:
+        hls_last_access[channel_id] = now
+
+    return Response(data, mimetype='application/vnd.apple.mpegurl')
 
 
-def stop_rtmp_service():
-    if sys.platform == "win32":
-        try:
-            os.chdir(nginx_dir)
-            subprocess.Popen([stop_path], shell=True)
-        except Exception as e:
-            print(f"❌ Rtmp service stop failed: {e}")
+@app.post('/on_done')
+def on_done():
+    form = request.form
+    channel_id = form.get('name', '')
+
+    print(t("msg.rtmp_on_done").format(channel_id=channel_id))
+    return ''
 
 
 def run_service():
     try:
         if not os.getenv("GITHUB_ACTIONS"):
             if config.open_rtmp and sys.platform == "win32":
-                original_dir = os.getcwd()
-                try:
-                    os.chdir(nginx_dir)
-                    subprocess.Popen([nginx_path], shell=True)
-                except Exception as e:
-                    print(f"❌ Rtmp service start failed: {e}")
-                finally:
-                    os.chdir(original_dir)
-            ip_address = get_ip_address()
-            print(f"📄 Result log: {ip_address}/log/result")
-            print(f"📄 Speed test log: {ip_address}/log/speed-test")
+                start_rtmp_service()
+            public_url = get_public_url()
+            mode = [t("name.direct_connection")]
             if config.open_rtmp:
-                print(f"🚀 Live api: {ip_address}/live")
-                print(f"🚀 HLS api: {ip_address}/hls")
-            print(f"🚀 IPv4 api: {ip_address}/ipv4")
-            print(f"🚀 IPv6 api: {ip_address}/ipv6")
-            print(f"✅ You can use this url to watch IPTV 📺: {ip_address}")
-            ensure_hls_dir()
+                mode.append(t("name.push_streaming"))
+            for m in mode:
+                if m == t("name.push_streaming"):
+                    print(t("msg.rtmp_full_api").format(mode=m, api=f"{public_url}/hls"))
+                else:
+                    print(t("msg.full_api").format(mode=m, api=public_url))
             app.run(host="0.0.0.0", port=config.app_port)
     except Exception as e:
-        print(f"❌ Service start failed: {e}")
+        print(t("msg.error_service_start_failed").format(info=e))
 
 
 if __name__ == "__main__":
-    if config.open_rtmp:
+    if config.open_rtmp and sys.platform == "win32":
         atexit.register(stop_rtmp_service)
     run_service()

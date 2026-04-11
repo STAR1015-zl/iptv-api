@@ -5,7 +5,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import utils.constants as constants
 from utils.config import config
-from utils.tools import resource_path
+from utils.tools import resource_path, get_public_url
 
 
 class DefaultUI:
@@ -226,7 +226,7 @@ class DefaultUI:
         self.ipv_type_label.pack(side=tk.LEFT, padx=4, pady=8)
         self.ipv_type_combo = ttk.Combobox(frame_default_channel_column2, width=5)
         self.ipv_type_combo.pack(side=tk.LEFT, padx=4, pady=8)
-        self.ipv_type_combo["values"] = ("IPv4", "IPv6", "全部")
+        self.ipv_type_combo["values"] = ("IPv4", "IPv6", "all")
         if config.ipv_type == "ipv4":
             self.ipv_type_combo.current(0)
         elif config.ipv_type == "ipv6":
@@ -268,20 +268,6 @@ class DefaultUI:
             command=self.update_open_headers
         )
         self.open_headers_checkbutton.pack(side=tk.LEFT, padx=4, pady=8)
-
-        self.open_driver_label = tk.Label(
-            frame_proxy_m3u_column2, text="浏览器模式:", width=12
-        )
-        self.open_driver_label.pack(side=tk.LEFT, padx=4, pady=8)
-        self.open_driver_var = tk.BooleanVar(value=config.open_driver)
-        self.open_driver_checkbutton = ttk.Checkbutton(
-            frame_proxy_m3u_column2,
-            variable=self.open_driver_var,
-            onvalue=True,
-            offvalue=False,
-            command=self.update_open_driver
-        )
-        self.open_driver_checkbutton.pack(side=tk.LEFT, padx=4, pady=8)
 
         frame_default_open_update_info = tk.Frame(root)
         frame_default_open_update_info.pack(fill=tk.X)
@@ -403,6 +389,35 @@ class DefaultUI:
         self.cdn_url_entry.insert(0, config.cdn_url)
         self.cdn_url_entry.bind("<KeyRelease>", self.update_cdn_url)
 
+        frame_channel_logo = tk.Frame(root)
+        frame_channel_logo.pack(fill=tk.X)
+        frame_channel_logo_column1 = tk.Frame(
+            frame_channel_logo
+        )
+        frame_channel_logo_column1.pack(side=tk.LEFT, fill=tk.Y)
+        frame_channel_logo_column2 = tk.Frame(
+            frame_channel_logo
+        )
+        frame_channel_logo_column2.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.logo_url_label = tk.Label(
+            frame_channel_logo_column1, text="台标库地址:", width=12
+        )
+        self.logo_url_label.pack(side=tk.LEFT, padx=4, pady=8)
+        self.logo_url_entry = tk.Entry(frame_channel_logo_column1, width=36)
+        self.logo_url_entry.pack(side=tk.LEFT, padx=4, pady=8)
+        self.logo_url_entry.insert(0, config.logo_url)
+        self.logo_url_entry.bind("<KeyRelease>", self.update_logo_url)
+
+        self.logo_type_label = tk.Label(
+            frame_channel_logo_column2, text="台标文件类型:", width=12
+        )
+        self.logo_type_label.pack(side=tk.LEFT, padx=4, pady=8)
+        self.logo_type_entry = tk.Entry(frame_channel_logo_column2, width=8)
+        self.logo_type_entry.pack(side=tk.LEFT, padx=4, pady=8)
+        self.logo_type_entry.insert(0, config.logo_type)
+        self.logo_type_entry.bind("<KeyRelease>", self.update_logo_type)
+
         frame_default_url_keywords = tk.Frame(root)
         frame_default_url_keywords.pack(fill=tk.X)
         frame_default_url_keywords_column1 = tk.Frame(frame_default_url_keywords)
@@ -507,9 +522,6 @@ class DefaultUI:
     def update_open_request(self):
         config.set("Settings", "open_requests", str(self.open_request_var.get()))
 
-    def update_open_driver(self):
-        config.set("Settings", "open_driver", str(self.open_driver_var.get()))
-
     def update_open_m3u_result(self):
         config.set("Settings", "open_m3u_result", str(self.open_m3u_result_var.get()))
 
@@ -527,6 +539,12 @@ class DefaultUI:
 
     def update_cdn_url(self, event):
         config.set("Settings", "cdn_url", self.cdn_url_entry.get())
+
+    def update_logo_url(self, event):
+        config.set("Settings", "logo_url", self.logo_url_entry.get())
+
+    def update_logo_type(self, event):
+        config.set("Settings", "logo_type", self.logo_type_entry.get())
 
     def update_open_update_time(self):
         config.set("Settings", "open_update_time", str(self.open_update_time_var.get()))
@@ -568,7 +586,8 @@ class DefaultUI:
         self.edit_file(constants.alias_path)
 
     def view_rtmp_stat(self):
-        webbrowser.open_new_tab("http://localhost:8080/stat")
+        public_url = get_public_url()
+        webbrowser.open_new_tab(f"{public_url}/stat")
 
     def change_entry_state(self, state):
         for entry in [
@@ -580,13 +599,14 @@ class DefaultUI:
             "open_history_checkbutton",
             "open_use_cache_checkbutton",
             "open_request_checkbutton",
-            "open_driver_checkbutton",
             "request_timeout_entry",
             "source_file_entry",
             "source_file_button",
             "source_file_edit_button",
             "time_zone_entry",
             "cdn_url_entry",
+            "logo_url_entry",
+            "logo_type_entry",
             "final_file_entry",
             "final_file_button",
             "final_file_edit_button",
